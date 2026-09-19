@@ -98,6 +98,31 @@ void CSolidObject::PostLoad()
 		return;
 
 	localModel.SetModel(model, false);
+	ApplyPolygonPieceVolumes();
+}
+
+void CSolidObject::ApplyPolygonPieceVolumes()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	if (!GetDef()->usePolygonPieceVolumes)
+		return;
+
+	for (LocalModelPiece& lmp: localModel.pieces) {
+		CollisionVolume* cv = lmp.GetCollisionVolume();
+
+		if (cv == nullptr)
+			continue;
+
+		// scales/offsets are unused by this type: the shape and its
+		// placement both come from the piece geometry itself
+		cv->InitShape(
+			ZeroVector, ZeroVector,
+			CollisionVolume::COLVOL_TYPE_POLYGON,
+			CollisionVolume::COLVOL_HITTEST_CONT,
+			CollisionVolume::COLVOL_AXIS_Z
+		);
+	}
 }
 
 

@@ -129,6 +129,11 @@ public:
 
 	void PostLoad();
 
+	/// switches every piece of this object's LocalModel to
+	/// COLVOL_TYPE_POLYGON when the def asked for it; call right after
+	/// localModel.SetModel(), the piece volumes do not exist before that
+	void ApplyPolygonPieceVolumes();
+
 	virtual bool AddBuildPower(CUnit* builder, float amount) { return false; }
 	virtual void DoDamage(const DamageArray& damages, const float3& impulse, CUnit* attacker, int weaponDefID, int projectileID) {}
 

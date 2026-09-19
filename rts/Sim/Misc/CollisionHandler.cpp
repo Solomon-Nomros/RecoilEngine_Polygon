@@ -2,6 +2,8 @@
 
 #include "CollisionHandler.h"
 #include "CollisionVolume.h"
+#include "Rendering/Models/3DModelPiece.hpp"
+#include "Rendering/Models/LocalModelPiece.hpp"
 #include "Map/ReadMap.h" // mapDims
 #include "Sim/Misc/GroundBlockingObjectMap.h"
 #include "Sim/Misc/GlobalConstants.h"
@@ -243,7 +245,7 @@ bool CCollisionHandler::IntersectPieceTreeHelper(
 
 		CollisionQuery cq;
 
-		if ((ret = CCollisionHandler::Intersect(lmpVol, volMat, p0, p1, &cq))) {
+		if ((ret = CCollisionHandler::Intersect(lmpVol, volMat, p0, p1, &cq, lmp))) {
 			cq.SetHitPiece(lmp); cqs->push_back(cq);
 		}
 
@@ -282,7 +284,7 @@ bool CCollisionHandler::IntersectPiecesHelper(
 		volMat.Translate(lmpVol->GetOffsets());
 
 		CollisionQuery cqn;
-		if (!CCollisionHandler::Intersect(lmpVol, volMat, p0, p1, &cqn))
+		if (!CCollisionHandler::Intersect(lmpVol, volMat, p0, p1, &cqn, lmp))
 			continue;
 
 		// skip if neither an ingress nor an egress hit
@@ -353,7 +355,7 @@ inline bool CCollisionHandler::Intersect(
 	return (CCollisionHandler::Intersect(v, mr, p0, p1, cq));
 }
 
-bool CCollisionHandler::Intersect(const CollisionVolume* v, const CMatrix44f& m, const float3& p0, const float3& p1, CollisionQuery* q)
+bool CCollisionHandler::Intersect(const CollisionVolume* v, const CMatrix44f& m, const float3& p0, const float3& p1, CollisionQuery* q, const LocalModelPiece* lmp)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	numContTests += 1;
@@ -363,21 +365,47 @@ bool CCollisionHandler::Intersect(const CollisionVolume* v, const CMatrix44f& m,
 	const float3 pi1 = mInv.Mul(p1);
 	bool intersect = false;
 
-	// minimum and maximum (x, y, z) coordinates of transformed ray
-	const float3 rmin = float3::min(pi0, pi1);
-	const float3 rmax = float3::max(pi0, pi1);
-	// minimum and maximum (x, y, z) coordinates of (bounding box around) volume
-	const float3 vmin = -v->GetHScales();
-	const float3 vmax =  v->GetHScales();
+	if (v->GetVolumeType() != CollisionVolume::COLVOL_TYPE_POLYGON) {
+		// minimum and maximum (x, y, z) coordinates of transformed ray
+		const float3 rmin = float3::min(pi0, pi1);
+		const float3 rmax = float3::max(pi0, pi1);
+		// minimum and maximum (x, y, z) coordinates of (bounding box around) volume
+		const float3 vmin = -v->GetHScales();
+		const float3 vmax =  v->GetHScales();
 
-	// check if ray segment misses (bounding box around) volume
-	// (if so, then no further intersection tests are necessary)
-	if (rmax.x < vmin.x || rmin.x > vmax.x)
-		return false;
-	if (rmax.y < vmin.y || rmin.y > vmax.y)
-		return false;
-	if (rmax.z < vmin.z || rmin.z > vmax.z)
-		return false;
+		// check if ray segment misses (bounding box around) volume
+		// (if so, then no further intersection tests are necessary)
+		if (rmax.x < vmin.x || rmin.x > vmax.x)
+			return false;
+		if (rmax.y < vmin.y || rmin.y > vmax.y)
+			return false;
+		if (rmax.z < vmin.z || rmin.z > vmax.z)
+			return false;
+	} else {
+		// POLYGON ignores the axis scales (its shape IS the geometry), so
+		// the box test above would be meaningless. Reject against a sphere
+		// derived from the piece's own extents instead, so rays nowhere
+		// near it never reach the per-triangle loop.
+		const S3DModelPiece* piece = (lmp != nullptr) ? lmp->original : nullptr;
+
+		if (piece == nullptr)
+			return false;
+
+		// radius of the piece AABB about the piece origin, O(1) from data
+		// the piece already carries -- nothing cached, nothing to go stale
+		const float3 e = float3::max(float3::fabs(piece->mins), float3::fabs(piece->maxs));
+		const float radiusSq = e.SqLength();
+
+		const float3 seg = pi1 - pi0;
+		const float segLenSq = seg.SqLength();
+
+		float t = 0.0f;
+		if (segLenSq > COLLISION_VOLUME_EPS)
+			t = std::clamp(-pi0.dot(seg) / segLenSq, 0.0f, 1.0f);
+
+		if ((pi0 + seg * t).SqLength() > radiusSq)
+			return false;
+	}
 
 	switch (v->GetVolumeType()) {
 		case CollisionVolume::COLVOL_TYPE_ELLIPSOID:
@@ -387,6 +415,9 @@ bool CCollisionHandler::Intersect(const CollisionVolume* v, const CMatrix44f& m,
 		} break;
 		case CollisionVolume::COLVOL_TYPE_CYLINDER: {
 			intersect = CCollisionHandler::IntersectCylinder(v, pi0, pi1, q);
+		} break;
+		case CollisionVolume::COLVOL_TYPE_POLYGON: {
+			intersect = CCollisionHandler::IntersectPolygon(v, lmp, pi0, pi1, q);
 		} break;
 		case CollisionVolume::COLVOL_TYPE_BOX: {
 			// also covers footprints, but without taking the blocking-map into account
@@ -801,3 +832,108 @@ bool CCollisionHandler::IntersectBox(const CollisionVolume* v, const float3& pi0
 	return (b0 == CQ_POINT_ON_RAY || b1 == CQ_POINT_ON_RAY);
 }
 
+
+// Möller-Trumbore ray/triangle test; <t> is the distance along <dir>
+static bool RayTriangleIntersect(
+	const float3& org, const float3& dir,
+	const float3& v0, const float3& v1, const float3& v2,
+	float& t
+) {
+	const float3 e1 = v1 - v0;
+	const float3 e2 = v2 - v0;
+	const float3 pv = dir.cross(e2);
+	const float det = e1.dot(pv);
+
+	// degenerate triangle, or ray parallel to its plane
+	if (math::fabs(det) <= COLLISION_VOLUME_EPS)
+		return false;
+
+	const float invDet = 1.0f / det;
+	const float3 tv = org - v0;
+
+	const float u = tv.dot(pv) * invDet;
+	if (u < 0.0f || u > 1.0f)
+		return false;
+
+	const float3 qv = tv.cross(e1);
+	const float w = dir.dot(qv) * invDet;
+	if (w < 0.0f || (u + w) > 1.0f)
+		return false;
+
+	t = e2.dot(qv) * invDet;
+	return true;
+}
+
+/*
+ * COLVOL_TYPE_POLYGON: trace the piece's real triangles.
+ *
+ * pi0/pi1 arrive in piece-local space (IntersectPiecesHelper builds the
+ * matrix as m * lmp->GetModelSpaceMatrix(), and InitShape() forces this
+ * type's offsets to zero so the extra Translate() is a no-op). The piece
+ * vertices live in that very same space -- ModelUtils.cpp converts them
+ * there explicitly ("transform model space mesh vertices into bone/piece
+ * space"). So no further transform is needed, and the volume inherits the
+ * piece's own orientation for free instead of carrying a second one.
+ */
+bool CCollisionHandler::IntersectPolygon(const CollisionVolume* v, const LocalModelPiece* lmp, const float3& pi0, const float3& pi1, CollisionQuery* q)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	const S3DModelPiece* piece = (lmp != nullptr) ? lmp->original : nullptr;
+
+	if (piece == nullptr || !piece->HasGeometryData())
+		return false;
+
+	const float3 seg = pi1 - pi0;
+	const float segLen = seg.Length();
+
+	if (segLen <= COLLISION_VOLUME_EPS)
+		return false;
+
+	const float3 dir = seg / segLen;
+
+	const auto& verts = piece->GetVerticesVec();
+	const auto& indcs = piece->GetIndicesVec();
+
+	// nearest (ingress) and farthest (egress) surface crossing along the
+	// segment; a closed shell yields both, an open one only the first
+	float nearT =  std::numeric_limits<float>::max();
+	float farT  = -std::numeric_limits<float>::max();
+
+	for (size_t i = 0; i + 2 < indcs.size(); i += 3) {
+		const uint32_t ia = indcs[i + 0];
+		const uint32_t ib = indcs[i + 1];
+		const uint32_t ic = indcs[i + 2];
+
+		if (ia >= verts.size() || ib >= verts.size() || ic >= verts.size())
+			continue;
+
+		float t = 0.0f;
+
+		if (!RayTriangleIntersect(pi0, dir, verts[ia].pos, verts[ib].pos, verts[ic].pos, t))
+			continue;
+		if (t < 0.0f || t > segLen)
+			continue;
+
+		nearT = std::min(nearT, t);
+		farT  = std::max(farT , t);
+	}
+
+	if (nearT > farT)
+		return false;
+
+	if (q != nullptr) {
+		q->b0 = CQ_POINT_ON_RAY;
+		q->t0 = nearT;
+		q->p0 = pi0 + dir * nearT;
+
+		// only report an egress point if it is a distinct second crossing
+		const bool hasEgress = ((farT - nearT) > COLLISION_VOLUME_EPS);
+
+		q->b1 = hasEgress ? CQ_POINT_ON_RAY : CQ_POINT_NO_INT;
+		q->t1 = hasEgress ? farT : nearT;
+		q->p1 = hasEgress ? (pi0 + dir * farT) : q->p0;
+	}
+
+	return true;
+}
