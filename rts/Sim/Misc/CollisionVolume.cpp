@@ -402,8 +402,11 @@ float CollisionVolume::GetPolygonDistance(const float3& pv, const LocalModelPiec
 	if (piece == nullptr || !piece->HasGeometryData())
 		return 0.0f;
 
-	const auto& verts = piece->GetVerticesVec();
+	const auto& verts = piece->GetCollisionVertsVec();
 	const auto& indcs = piece->GetIndicesVec();
+
+	if (verts.empty())
+		return 0.0f;
 
 	float minDistSq = std::numeric_limits<float>::max();
 
@@ -415,7 +418,7 @@ float CollisionVolume::GetPolygonDistance(const float3& pv, const LocalModelPiec
 		if (ia >= verts.size() || ib >= verts.size() || ic >= verts.size())
 			continue;
 
-		const float3 q = ClosestPointOnTriangle(pv, verts[ia].pos, verts[ib].pos, verts[ic].pos);
+		const float3 q = ClosestPointOnTriangle(pv, verts[ia], verts[ib], verts[ic]);
 		minDistSq = std::min(minDistSq, (q - pv).SqLength());
 	}
 

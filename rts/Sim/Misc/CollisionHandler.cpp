@@ -355,6 +355,44 @@ inline bool CCollisionHandler::Intersect(
 	return (CCollisionHandler::Intersect(v, mr, p0, p1, cq));
 }
 
+// slab test of a finite segment against an axis-aligned box, both given in
+// the same space; used only as a broad-phase reject, so it answers "could
+// this possibly hit" and never reports where
+static bool RaySegmentHitsAABB(const float3& p0, const float3& p1, const float3& mins, const float3& maxs)
+{
+	const float3 d = p1 - p0;
+
+	float tmin = 0.0f;
+	float tmax = 1.0f;
+
+	for (int a = 0; a < 3; a++) {
+		if (math::fabs(d[a]) < COLLISION_VOLUME_EPS) {
+			// segment is parallel to this pair of planes: it either lies
+			// between them for its whole length, or never enters the box
+			if (p0[a] < mins[a] || p0[a] > maxs[a])
+				return false;
+
+			continue;
+		}
+
+		const float inv = 1.0f / d[a];
+
+		float t0 = (mins[a] - p0[a]) * inv;
+		float t1 = (maxs[a] - p0[a]) * inv;
+
+		if (t0 > t1)
+			std::swap(t0, t1);
+
+		tmin = std::max(tmin, t0);
+		tmax = std::min(tmax, t1);
+
+		if (tmin > tmax)
+			return false;
+	}
+
+	return true;
+}
+
 bool CCollisionHandler::Intersect(const CollisionVolume* v, const CMatrix44f& m, const float3& p0, const float3& p1, CollisionQuery* q, const LocalModelPiece* lmp)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -383,27 +421,20 @@ bool CCollisionHandler::Intersect(const CollisionVolume* v, const CMatrix44f& m,
 			return false;
 	} else {
 		// POLYGON ignores the axis scales (its shape IS the geometry), so
-		// the box test above would be meaningless. Reject against a sphere
-		// derived from the piece's own extents instead, so rays nowhere
-		// near it never reach the per-triangle loop.
+		// the box test above would be meaningless. Reject against the
+		// piece's own extents instead, so rays nowhere near it never reach
+		// the per-triangle loop.
+		//
+		// A bounding sphere would be cheaper per test but is a poor fit for
+		// elongated pieces -- a gun barrel's sphere has a radius of half its
+		// length and is mostly empty, so shots passing anywhere alongside it
+		// still pay for a full triangle scan. The slab test below costs a
+		// little more and rejects far more tightly.
 		const S3DModelPiece* piece = (lmp != nullptr) ? lmp->original : nullptr;
 
 		if (piece == nullptr)
 			return false;
-
-		// radius of the piece AABB about the piece origin, O(1) from data
-		// the piece already carries -- nothing cached, nothing to go stale
-		const float3 e = float3::max(float3::fabs(piece->mins), float3::fabs(piece->maxs));
-		const float radiusSq = e.SqLength();
-
-		const float3 seg = pi1 - pi0;
-		const float segLenSq = seg.SqLength();
-
-		float t = 0.0f;
-		if (segLenSq > COLLISION_VOLUME_EPS)
-			t = std::clamp(-pi0.dot(seg) / segLenSq, 0.0f, 1.0f);
-
-		if ((pi0 + seg * t).SqLength() > radiusSq)
+		if (!RaySegmentHitsAABB(pi0, pi1, piece->mins, piece->maxs))
 			return false;
 	}
 
@@ -892,8 +923,14 @@ bool CCollisionHandler::IntersectPolygon(const CollisionVolume* v, const LocalMo
 
 	const float3 dir = seg / segLen;
 
-	const auto& verts = piece->GetVerticesVec();
+	// positions-only array: the tracing loop touches nothing else, and
+	// pulling 80-byte vertices through the cache for 12 bytes of position
+	// wastes most of every cache line it reads
+	const auto& verts = piece->GetCollisionVertsVec();
 	const auto& indcs = piece->GetIndicesVec();
+
+	if (verts.empty())
+		return false;
 
 	// nearest (ingress) and farthest (egress) surface crossing along the
 	// segment; a closed shell yields both, an open one only the first
@@ -910,7 +947,7 @@ bool CCollisionHandler::IntersectPolygon(const CollisionVolume* v, const LocalMo
 
 		float t = 0.0f;
 
-		if (!RayTriangleIntersect(pi0, dir, verts[ia].pos, verts[ib].pos, verts[ic].pos, t))
+		if (!RayTriangleIntersect(pi0, dir, verts[ia], verts[ib], verts[ic], t))
 			continue;
 		if (t < 0.0f || t > segLen)
 			continue;

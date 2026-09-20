@@ -220,6 +220,21 @@ Transform S3DModelPiece::ComposeTransform(const float3& t, const float3& r, floa
 }
 
 
+void S3DModelPiece::BuildCollisionVerts()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	collisionVerts.clear();
+
+	if (!HasGeometryData())
+		return;
+
+	collisionVerts.reserve(vertices.size());
+
+	for (const SVertexData& v : vertices)
+		collisionVerts.push_back(v.pos);
+}
+
 void S3DModelPiece::PostProcessGeometry(uint32_t pieceIndex)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
