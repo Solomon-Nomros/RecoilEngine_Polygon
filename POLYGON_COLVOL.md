@@ -103,8 +103,11 @@ does not sit on the mesh, neither do the hits.
   it. It stays a sphere and defers to the piece tree, the same way
   `usePieceCollisionVolumes` already works.
 - **Broad-phase.** The axis-scale box reject is meaningless for this type,
-  so a bounding sphere derived from the piece's own `mins`/`maxs` is used
-  instead; rays nowhere near a piece never reach the per-triangle loop.
+  so a slab test against the piece's own `mins`/`maxs` is used instead;
+  rays nowhere near a piece never reach the per-triangle loop. A bounding
+  sphere would be cheaper per test but fits elongated pieces poorly — a
+  gun barrel's sphere has a radius of half its length and is mostly empty,
+  so shots passing alongside it would still pay for a full triangle scan.
 - **Discrete (point-in-volume) testing is not implemented.** It is also
   unreachable: `DetectHit()` branches to `IntersectPieceTree()` when
   `DefaultToPieceTree()` is set, before the continuous/discrete choice is
@@ -115,8 +118,14 @@ does not sit on the mesh, neither do the hits.
 
 Cost scales with triangle count per piece: a box is closed-form maths, a
 polygon is a loop. Low-poly collision shells are recommended. The
-bounding-sphere reject keeps rays that miss entirely out of the loop, but
-a detailed mesh will still cost more than a primitive.
+broad-phase reject keeps rays that miss entirely out of the loop, but a
+detailed mesh will still cost more than a primitive.
+
+Tracing reads from a positions-only array built once per piece at model
+load, rather than from the interleaved vertex buffer. A full `SVertexData`
+is 80 bytes — position, normal, two tangents, bone weights, UVs — of which
+the ray test uses the 12 bytes of position; reading whole vertices would
+waste most of every cache line it touches.
 
 ### Changed files
 
@@ -128,6 +137,8 @@ rts/Sim/Objects/SolidObjectDef.{h,cpp}
 rts/Sim/Units/Unit.cpp
 rts/Sim/Features/Feature.cpp
 rts/Rendering/DebugColVolDrawer.cpp
+rts/Rendering/Models/3DModelPiece.{hpp,cpp}
+rts/Rendering/Models/IModelParser.cpp
 rts/Lua/LuaSyncedCtrl.cpp
 rts/Lua/LuaSyncedRead.cpp
 rts/Lua/LuaUtils.cpp
@@ -151,6 +162,11 @@ Tested on Windows. Verified in game: units spawn, polygon outlines follow
 the real geometry on angled pieces, hits register per piece, and mixed
 volume types coexist on one unit. Not benchmarked under heavy unit counts;
 no automated tests added.
+
+**v2** adds two performance changes that leave behaviour untouched: the
+positions-only tracing array described under *Cost*, and the slab-test
+broad-phase described under *Design notes*. Both were verified to produce
+identical outlines and identical hit results.
 
 ### AI disclosure
 
@@ -262,9 +278,12 @@ local sx,sy,sz, ox,oy,oz, vType, testType, pAxis, ignoreHits =
   piece'а. Он остаётся сферой и делегирует в дерево piece'ов, ровно как
   штатный `usePieceCollisionVolumes`.
 - **Ранний отсев.** Проверка по коробке из осевых размеров для этого типа
-  бессмысленна, поэтому используется сфера, выведенная из собственных
+  бессмысленна, поэтому используется слэб-тест по собственным
   `mins`/`maxs` piece'а: лучи, проходящие далеко, до перебора
-  треугольников не доходят.
+  треугольников не доходят. Ограничивающая сфера обошлась бы дешевле, но
+  плохо облегает вытянутые детали — у ствола пушки её радиус равен
+  половине длины и внутри в основном пустота, так что выстрелы,
+  пролетающие вдоль него, всё равно оплачивали бы полный перебор.
 - **Дискретный тест «точка внутри» не реализован.** Он же и недостижим:
   `DetectHit()` уходит в `IntersectPieceTree()` при включённом
   `DefaultToPieceTree()` — раньше, чем выбирается непрерывный или
@@ -275,8 +294,15 @@ local sx,sy,sz, ox,oy,oz, vType, testType, pAxis, ignoreHits =
 
 Стоимость растёт с числом треугольников на piece: коробка считается
 формулой, полигон — циклом. Рекомендуются низкополигональные
-коллизионные «скорлупы». Отсев по сфере убирает из цикла лучи, проходящие
+коллизионные «скорлупы». Ранний отсев убирает из цикла лучи, проходящие
 мимо, но детальный меш всё равно обойдётся дороже примитива.
+
+Трассировка читает из массива, содержащего только позиции, который
+строится один раз на piece при загрузке модели, а не из общего вершинного
+буфера. Полный `SVertexData` весит 80 байт — позиция, нормаль, два
+тангенса, веса костей, UV — из которых тесту луча нужны 12 байт позиции;
+чтение вершин целиком тратило бы впустую большую часть каждой
+прочитанной кэш-линии.
 
 ### Изменённые файлы
 
@@ -288,6 +314,8 @@ rts/Sim/Objects/SolidObjectDef.{h,cpp}
 rts/Sim/Units/Unit.cpp
 rts/Sim/Features/Feature.cpp
 rts/Rendering/DebugColVolDrawer.cpp
+rts/Rendering/Models/3DModelPiece.{hpp,cpp}
+rts/Rendering/Models/IModelParser.cpp
 rts/Lua/LuaSyncedCtrl.cpp
 rts/Lua/LuaSyncedRead.cpp
 rts/Lua/LuaUtils.cpp
@@ -312,6 +340,11 @@ bash docker-build-v2/build.sh windows
 попадания засчитываются по конкретному piece'у, разные типы объёмов
 уживаются на одном юните. Под нагрузкой из десятков юнитов не измерялось,
 автоматических тестов не добавлено.
+
+**v2** добавляет две правки производительности, не меняющие поведение:
+массив только с позициями для трассировки (см. «Цена») и слэб-тест в
+раннем отсеве (см. «Замечания по устройству»). Обе проверены: контуры и
+результаты попаданий остались идентичными.
 
 ### Раскрытие использования ИИ
 
