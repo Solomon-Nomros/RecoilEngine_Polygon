@@ -98,7 +98,11 @@ void CSolidObject::PostLoad()
 		return;
 
 	localModel.SetModel(model, false);
-	ApplyPolygonPieceVolumes();
+
+	// Deliberately not re-applying the def here. Piece volumes are
+	// serialized, so loading has already restored them -- including
+	// whatever scripts changed during the match. Applying the def on top
+	// would quietly undo all of it, and only on the next load.
 }
 
 void CSolidObject::ApplyPolygonPieceVolumes()

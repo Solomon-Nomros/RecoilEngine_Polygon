@@ -131,7 +131,9 @@ public:
 
 	/// switches every piece of this object's LocalModel to
 	/// COLVOL_TYPE_POLYGON when the def asked for it; call right after
-	/// localModel.SetModel(), the piece volumes do not exist before that
+	/// localModel.SetModel() on a freshly created object, the piece volumes
+	/// do not exist before that. Not on savegame loads: those restore the
+	/// volumes themselves, runtime changes included.
 	void ApplyPolygonPieceVolumes();
 
 	virtual bool AddBuildPower(CUnit* builder, float amount) { return false; }

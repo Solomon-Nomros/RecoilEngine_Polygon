@@ -27,6 +27,7 @@ struct S3DModelPiece {
 
 		vertices.clear();
 		collisionVerts.clear();
+		closedCollisionMesh = false;
 		indices.clear();
 		shatterIndices.clear();
 
@@ -98,6 +99,11 @@ public:
 	/// cannot accidentally skip it.
 	void BuildCollisionVerts();
 
+	/// True when the collision triangles form a closed surface: every edge
+	/// is shared by exactly two of them. Only then does "inside the volume"
+	/// mean anything, so only then is a point ever reported as being there.
+	bool HasClosedCollisionMesh() const { return closedCollisionMesh; }
+
 	const std::vector<SVertexData>& GetVerticesVec() const { return vertices; }
 	const std::vector<uint32_t>& GetIndicesVec() const { return indices; }
 	const std::vector<uint32_t>& GetShatterIndicesVec() const { return shatterIndices; }
@@ -137,6 +143,7 @@ public:
 protected:
 	std::vector<SVertexData> vertices;
 	std::vector<float3> collisionVerts;
+	bool closedCollisionMesh = false;
 	std::vector<uint32_t> indices;
 	std::vector<uint32_t> shatterIndices;
 

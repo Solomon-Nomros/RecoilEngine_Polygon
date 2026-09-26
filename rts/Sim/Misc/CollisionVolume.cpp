@@ -391,6 +391,54 @@ static float3 ClosestPointOnTriangle(const float3& p, const float3& a, const flo
 	return a + ab * (vb * denom) + ac * (vc * denom);
 }
 
+// Crossing parity along an arbitrary ray: odd means the point is enclosed.
+// The direction is deliberately skew, so that it is very unlikely to graze an
+// edge or a vertex, where a crossing could be counted twice or not at all.
+static bool PointInsidePolygonMesh(const float3& p, const std::vector<float3>& verts, const std::vector<uint32_t>& indcs)
+{
+	constexpr float EPS = 1e-6f;
+	const float3 dir = float3(0.5773503f, 0.6981317f, 0.4240113f).SafeNormalize();
+
+	int crossings = 0;
+
+	for (size_t i = 0; i + 2 < indcs.size(); i += 3) {
+		const uint32_t ia = indcs[i + 0];
+		const uint32_t ib = indcs[i + 1];
+		const uint32_t ic = indcs[i + 2];
+
+		if (ia >= verts.size() || ib >= verts.size() || ic >= verts.size())
+			continue;
+
+		const float3& v0 = verts[ia];
+		const float3 e1 = verts[ib] - v0;
+		const float3 e2 = verts[ic] - v0;
+		const float3 pv = dir.cross(e2);
+		const float det = e1.dot(pv);
+
+		if (math::fabs(det) <= EPS)
+			continue;
+
+		const float invDet = 1.0f / det;
+		const float3 tv = p - v0;
+
+		const float u = tv.dot(pv) * invDet;
+
+		if (u < 0.0f || u > 1.0f)
+			continue;
+
+		const float3 qv = tv.cross(e1);
+		const float w = dir.dot(qv) * invDet;
+
+		if (w < 0.0f || (u + w) > 1.0f)
+			continue;
+
+		if ((e2.dot(qv) * invDet) > EPS)
+			crossings++;
+	}
+
+	return ((crossings & 1) == 1);
+}
+
 float CollisionVolume::GetPolygonDistance(const float3& pv, const LocalModelPiece* lmp) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -423,6 +471,17 @@ float CollisionVolume::GetPolygonDistance(const float3& pv, const LocalModelPiec
 	}
 
 	if (minDistSq == std::numeric_limits<float>::max())
+		return 0.0f;
+
+	// Every other volume type reports 0 for a point inside itself, and the
+	// callers rely on it: explosion damage falls off with this distance and
+	// stops applying entirely past the blast radius. Without this a charge
+	// going off inside a hull would be treated as sitting a hull-width away.
+	//
+	// Only asked of a closed surface, since "inside" means nothing for an
+	// open one, and answering it anyway would put distant points on the far
+	// side of a single plate "inside" it.
+	if (piece->HasClosedCollisionMesh() && PointInsidePolygonMesh(pv, verts, indcs))
 		return 0.0f;
 
 	return math::sqrt(minDistSq);
